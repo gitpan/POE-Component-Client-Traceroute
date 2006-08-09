@@ -1,0 +1,13 @@
+# http://module-build.sourceforge.net/META-spec.html
+#XXXXXXX This is a prototype!!!  It will change in the future!!! XXXXX#
+name:         POE-Component-Client-Traceroute
+version:      0.10
+version_from: Traceroute.pm
+installdirs:  site
+requires:
+    Net::RawIP:                    0.02
+    POE:                           0.11
+    Time::HiRes:                   1.2
+
+distribution_type: module
+generated_by: ExtUtils::MakeMaker version 6.30
