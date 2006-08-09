@@ -13,7 +13,7 @@ BEGIN {
 
 sub POE::Kernel::ASSERT_DEFAULT () { 1 };
 use POE qw/Component::Client::Traceroute/;
-use Test::More tests => 1;
+use Test::More tests => 4;
 
 sub DEBUG () { 0 }
 
@@ -127,6 +127,11 @@ POE::Session->create
 
          DEBUG and print "\n\n" if ($heap->{traces} == 0);
 
+         if (not $callback)
+         {
+            ok ( $heap->{rows} > 0, "PerRowPostback got rows" );
+         }
+
          if ($hops)
          {
             if ($error)
@@ -164,9 +169,12 @@ POE::Session->create
                   }
                }
             }
+            ok ( $hops >= 1, "Got results from traceroute" );
          }
          else
          {
+            ok (! $error, "Traceroute error") or diag($error);
+
             if ($error) # Error performing traceroute
             {
                DEBUG and print $error;

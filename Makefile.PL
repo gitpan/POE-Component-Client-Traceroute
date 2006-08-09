@@ -9,6 +9,7 @@ WriteMakefile(
     NAME         => 'POE::Component::Client::Traceroute',
     AUTHOR       => 'Andrew Hoying <ahoying@cpan.org>',
     ABSTRACT     => 'POE component for non-blocking/concurrent traceroutes.',
+    LICENSE      => 'perl',
     VERSION_FROM => 'Traceroute.pm',
 
     PM           => { 'Traceroute.pm' => '${INST_LIBDIR}/Traceroute.pm' },

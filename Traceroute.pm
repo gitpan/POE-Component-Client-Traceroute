@@ -3,16 +3,9 @@ package POE::Component::Client::Traceroute;
 use warnings;
 use strict;
 
-use Exporter;
-use vars qw(@ISA @EXPORT_OK %EXPORT_TAGS);
-
-@ISA = qw(Exporter);
-@EXPORT_OK = qw( );
-%EXPORT_TAGS = ( );
-
 use vars qw($VERSION $debug $debug_socket);
 
-$VERSION    = '0.10';
+$VERSION    = '0.11';
 
 use Carp qw(croak);
 use Socket;
@@ -21,25 +14,24 @@ use Net::RawIP;
 use Time::HiRes qw(time);
 
 use POE::Session;
-use POE::Kernel;
 
 $debug         = 0;
 $debug_socket  = 0;
 
-sub DEBUG         () { $debug } # Enable debug output.
-sub DEBUG_SOCKET  () { $debug_socket } # Output socket information.
+sub DEBUG            { return $debug } # Enable debug output.
+sub DEBUG_SOCKET     { return $debug_socket } # Output socket information.
 
 # from asm/socket.h
-sub SO_BINDTODEVICE () { 25 }
+sub SO_BINDTODEVICE  { return 25 }
 
 # from netinet/in.h
-sub IPPROTO_IP () { 0 }
+sub IPPROTO_IP       { return 0 }
 
 # from bits/in.h
-sub IP_TTL     () { 2 }
+sub IP_TTL           { return 2 }
 
 # Length of IP headers
-sub IP_HEADERS () { 28 }
+sub IP_HEADERS       { return 28 }
 
 # Spawn a new PoCo::Client::Traceroute session. This is the basic
 # constructor, but it does not return an object. Instead it launches
@@ -58,7 +50,7 @@ sub spawn
       $params{lc($_[$i])} = $_[$i+1];
    }
 
-   my $alias      = delete $params{alias} || "tracer";
+   my $alias      = delete $params{alias} || 'tracer';
    my $firsthop   = delete $params{firsthop} || 1;
    my $maxttl     = delete $params{maxttl} || 32;
    my $timeout    = delete $params{timeout} || undef;
@@ -79,25 +71,25 @@ sub spawn
    ) if %params;
 
    croak(
-      "FirstHop must be less than 255"
+      'FirstHop must be less than 255'
    ) if ($firsthop > 255);
    
    croak(
-      "MaxTTL must be less than 255"
+      'MaxTTL must be less than 255'
    ) if ($maxttl > 255);
 
    croak(
-      "PacketLen must be less than 1492 and greater than 31"
+      'PacketLen must be less than 1492 and greater than 31'
    ) if ($packetlen > 1492 or $packetlen < 32);
 
-   if ($useicmp)
-   {
-      croak "UseICMP option not yet implemented\n";
-   }
+   croak(
+      'UseICMP option not yet implemented'
+   ) if ($useicmp);
 
    POE::Session->create(
       inline_states => {
          _start            => \&tracer_start,
+         _stop             => sub { },
          traceroute        => \&tracer_traceroute,
          shutdown          => \&tracer_shutdown,
          _start_traceroute => \&_start_traceroute,
@@ -112,7 +104,7 @@ sub spawn
       ],
    );
 
-   undef;
+   return;
 }
 
 # Startup initialization method. Sets defaults from the spawn method
@@ -154,11 +146,17 @@ sub tracer_start
 
    $heap->{alias}       = $alias;
    $kernel->alias_set($alias);
+
+   return;
 }
 
 # The traceroute state takes 2 required and one optional argument. The first
 # is the event to post back to the sender, the second is the host to traceroute
 # to, the last is an array ref with options to override the defaults.
+
+# The function verifies the options and returns an error if any are incorrect.
+# It also starts the timer for the per traceroute timeout which is a safety
+# net to keep the process from hanging if something goes wrong.
 sub tracer_traceroute
 {
    my ($kernel, $heap, $sender, $event, $host, $useroptions) = 
@@ -169,16 +167,16 @@ sub tracer_traceroute
       if (DEBUG) { die "Postback state name required for traceroute\n" }
       return;
    }
+   my $error; 
 
    DEBUG and warn "TR: Starting traceroute to $host\n" if ($host);
-
-   my $error = "Host required for traceroute\n" unless ($host);
+   $error = "Host required for traceroute\n" unless ($host);
 
    my %options = %{$heap->{defaults}};
    my $callback;
 
 # Allow user to override options for each traceroute request
-   if (ref $useroptions eq "ARRAY")
+   if (ref $useroptions eq 'ARRAY')
    {
       my @useropts = @$useroptions;
       $error = "traceroute useroptions requires an even number of parameters\n" 
@@ -206,35 +204,23 @@ sub tracer_traceroute
       $error .= "traceroute's third argument must be an array ref\n";
    }
 
-   if ($options{useicmp})
-   {
-      $error .= "UseICMP option not yet implemented\n";
-   }
+   $error .= "UseICMP option not yet implemented\n"
+      if ($options{useicmp});
 
-   if ($options{baseport} > 65279)
-   {
-      $error .= "Baseport is too high, must be less than 65280\n";
-   }
+   $error .= "Baseport is too high, must be less than 65280\n"
+      if ($options{baseport} > 65279);
 
-   if ($options{maxttl} > 255)
-   {
-      $error .= "MaxTTL can not be higher than 255\n";
-   }
+   $error .= "MaxTTL can not be higher than 255\n"
+      if ($options{maxttl} > 255);
 
-   if ($options{firsthop} > 255)
-   {
-      $error .= "FirstHop can not be higher than 255\n";
-   }
+   $error .= "FirstHop can not be higher than 255\n"
+      if ($options{firsthop} > 255);
 
-   if ($options{firsthop} > $options{maxttl})
-   {
-      $error .= "FirstHop must be less than or equal to MaxTTL\n";
-   }
+   $error .= "FirstHop must be less than or equal to MaxTTL\n"
+      if ($options{firsthop} > $options{maxttl});
 
-   if ($options{packetlen} > 1492 or $options{packetlen} < 32)
-   {
-      $error .= "PacketLen must be less than 1492 and greater than 31\n";
-   }
+   $error .= "PacketLen must be less than 1492 and greater than 31\n"
+      if ($options{packetlen} > 1492 or $options{packetlen} < 32);
 
    my $postback = $sender->postback( $event, $host, \%options, $callback );
 
@@ -267,21 +253,43 @@ sub tracer_traceroute
 
       $kernel->yield('_start_traceroute' => $trsessionid);
    }
+
+   return;
 }
 
+# The shutdown state takes no parameters. It closes all open sockets,
+# posts back data to waiting sessions and removes any alarms.
 sub tracer_shutdown
 {
    my ($kernel, $heap) = @_[ KERNEL, HEAP ];
-   DEBUG and warn "PoCo::Client::Traceroute session " . $heap->{alias} .
-      " shutting down\n";
+   DEBUG and warn "PoCo::Client::Traceroute session $heap->{alias} " .
+      "shutting down\n";
 
    $kernel->select_read($heap->{icmpsocket});
    $kernel->alarm_remove_all();
 
+   foreach my $trsessionid (keys %{$heap->{sessions}})
+   {
+      my $session = $heap->{sessions}{$trsessionid};
+
+      my $error = "Traceroute session shutdown\n";
+
+      $session->{postback}->(_build_postback_options($session,$error));
+      $kernel->select_read($session->{socket_handle});
+      $kernel->alarm_remove($session->{timeout});
+      delete $heap->{sessions}{$trsessionid};
+   }
+
    $kernel->alias_remove($heap->{alias});
+
+   return 1;
 }
 
 # The following state functions are private, for internal use only.
+
+# This function opens up the socket and verifies it. It tells the POE Kernel
+# to wait for read readiness on the socket and it starts the 
+# _send_packet / _recv_packet loop.
 
 sub _start_traceroute
 {
@@ -301,14 +309,14 @@ sub _start_traceroute
    if ($session->{options}{device})
    {
       my $device = $session->{options}{device};
-      setsockopt($socket, SOL_SOCKET, SO_BINDTODEVICE(), pack("Z*", $device)) 
+      setsockopt($socket, SOL_SOCKET, SO_BINDTODEVICE(), pack('Z*', $device)) 
          or croak "error binding to device $device - $!";
 
       DEBUG_SOCKET and warn "TRS: Bound socket to $device\n";
    }
 
    if (  $session->{options}{sourceaddress} and 
-         $session->{options}{sourceaddress} ne "0.0.0.0" )
+         $session->{options}{sourceaddress} ne '0.0.0.0' )
    {
       _bind($socket, $session->{options}{sourceaddress});
    }
@@ -328,9 +336,16 @@ sub _start_traceroute
       $kernel->select_read($socket, '_recv_packet', $trsessionid, 'xyz');
 
                            
-      $kernel->yield( "_send_packet" => $trsessionid );
+      $kernel->yield( '_send_packet' => $trsessionid );
    }
+
+   return;
 }
+
+# This function connects to the remote destination on the current port
+# and sets the TTL on the socket before sending a UDP packet. It also
+# starts the query timeout alarm which is cleared when a packet is
+# received.
 
 sub _send_packet
 {
@@ -343,25 +358,19 @@ sub _send_packet
    }
 
    my $hop           = $session->{hop};
-   my $port          = $session->{options}{baseport} + $hop - 1;
+   my $port          = ($session->{lastport}) ? 
+      $session->{lastport} + 1 : $session->{options}{baseport} + $hop - 1;
 
    my $currentquery  = scalar keys %{$session->{hops}{$hop}};
 
-   my $message       = "a" x ($session->{options}{packetlen} - IP_HEADERS);
+   my $message       = 'a' x ($session->{options}{packetlen} - IP_HEADERS);
    
    if (not exists $session->{lastport} or $session->{lastport} != $port)
    {
-      my $socket_addr   = sockaddr_in($port,$session->{destination});
-      connect($session->{socket_handle},$socket_addr);
-      DEBUG_SOCKET and warn "TRS: Connected to $session->{host}\n";
+      _connect($session,$port);
 
-      setsockopt($session->{socket_handle}, IPPROTO_IP, IP_TTL, pack('C',$hop));
-      DEBUG_SOCKET and warn "TRS: Set TTL to $hop\n";
-
-      my $localaddr           = getsockname($session->{socket_handle});
-      my ($port,$addr)        = sockaddr_in($localaddr);
-      $session->{localport}   = $port;
-      $heap->{ports}{$port}   = $trsessionid;
+      $session->{lastport}                   = $port;
+      $heap->{ports}{$session->{localport}}  = $trsessionid;
    }
 
    $session->{lasttime} = time;
@@ -373,7 +382,15 @@ sub _send_packet
    DEBUG and warn "TR: Sent packet for $trsessionid\n";
    send($session->{socket_handle}, $message, 0);
    
+   return;
 }
+
+# This function reads in the packet. Decodes the packet and then verifies
+# the packet belongs to an active traceroute. If not the packet is discarded.
+# If it does then the information from the packet and it's RTT are stored
+# in the session heap and the alarm for the query timeout is cleared.
+# Finally it checks if it needs to send more packets by calling 
+# _process_results.
 
 sub _recv_packet
 {
@@ -407,7 +424,9 @@ sub _recv_packet
       if ($type == 11 or $type == 3)
       {
          $udp->bset($icmp_data);
-         my ($reply_sport) = $udp->get({udp=>['source']});
+         my ($reply_sport,$reply_dport) = $udp->get({udp=>['source','dest']});
+
+         $from_port = $reply_dport; # Set $from_port from the UDP packet
 
          $trsessionid   = $heap->{ports}{$reply_sport};
          $destunreach   = ($type == 3) ? 1 : 0;
@@ -418,6 +437,12 @@ sub _recv_packet
    {
       my $session = $heap->{sessions}{$trsessionid};
       DEBUG and warn "TR: Received packet for $trsessionid\n";
+
+      if ($from_port != $session->{lastport})
+      {
+         DEBUG and warn "TR: Packet out of order or after timeout, dropping\n";
+         return;
+      }
 
       $kernel->alarm_remove($session->{alarm});
 
@@ -444,7 +469,15 @@ sub _recv_packet
          delete $heap->{sessions}{$trsessionid};
       }
    }
+
+   return;
 }
+
+# This function is called whenever a query times out or the whole traceroute
+# times out. The $stop argument determines the state. When a query times out
+# The port number is incremented so that late replies don't mess up the system.
+# If a query timed out, then an * is stored for the RTT and the next packet
+# is sent.
 
 sub _timeout
 {
@@ -477,6 +510,11 @@ sub _timeout
    my $continue = _process_results($session,$currentquery);
    if ($continue)
    {
+      # Reconnect on timeout so we get a new port.
+      $session->{lastport}++;
+
+      _connect($session,$session->{lastport});
+      $heap->{ports}{$session->{localport}} = $trsessionid;
       $kernel->yield('_send_packet',$trsessionid);
    }
    else
@@ -485,14 +523,22 @@ sub _timeout
       $kernel->alarm_remove($session->{timeout});
       delete $heap->{sessions}{$trsessionid};
    }
+
+   return;
 }
+
+# Just in case we were sent a bad event name.
 
 sub tracer_default
 {
    DEBUG and warn "Unknown state: " . $_[ARG0] . "\n";
+   return;
 }
 
 # Internal private functions
+
+
+# This function binds the socket to a local IP address. It croaks on error.
 
 sub _bind
 {
@@ -508,6 +554,33 @@ sub _bind
 
    return 1;
 }
+
+# This function connects a socket to a remote system and sets the socket TTL
+
+sub _connect
+{
+   my ($session,$port)  = @_;
+   
+   my $hop              = $session->{hop};
+   my $socket_addr      = sockaddr_in($port,$session->{destination});
+
+   connect($session->{socket_handle},$socket_addr);
+   DEBUG_SOCKET and warn "TRS: Connected to $session->{host}\n";
+
+   setsockopt($session->{socket_handle}, IPPROTO_IP, IP_TTL, pack('C',$hop));
+   DEBUG_SOCKET and warn "TRS: Set TTL to $hop\n";
+
+   my $localaddr           = getsockname($session->{socket_handle});
+   my ($lport,$addr)       = sockaddr_in($localaddr);
+   $session->{localport}   = $lport;
+
+   return;
+}
+
+# This function is called after every packet is received or timed out.
+# It increments the hop count, sends PerHopPostbacks and regular Postbacks
+# and then returns if there are more queries to be sent or the traceroute
+# is complete.
 
 sub _process_results
 {
@@ -534,7 +607,7 @@ sub _process_results
       if ($session->{hop} > $session->{options}{maxttl} or $session->{stop})
       {
          my $error = ($session->{stop}) ? 
-            undef : "MaxTTL exceeded without reaching target";
+            undef : 'MaxTTL exceeded without reaching target';
 
          $session->{postback}->(_build_postback_options($session,$error));
          return 0;
@@ -543,6 +616,9 @@ sub _process_results
 
    return 1;
 }
+
+# This function takes the session heap and turns it into the response
+# which is sent back to the postback function.
 
 sub _build_postback_options
 {
@@ -566,6 +642,8 @@ sub _build_postback_options
    return @response;
 }
 
+# This function builds the actual data structure for each hop.
+
 sub _build_hopdata
 {
    my ($hopref,$hop) = @_;
@@ -581,9 +659,9 @@ sub _build_hopdata
       my $replytime  = $hopref->{$query}{replytime};
 
       push (@results, $replytime);
-      if (exists $row{routerip} and 
-            $row{routerip} ne $routerip and
-            $routerip ne "" )
+      if (  exists $row{routerip} and 
+            $routerip and $row{routerip}  and
+            $row{routerip} ne $routerip )
       {
          DEBUG and warn "TR: Router IP changed during hop $hop from " .
             $row{routerip} . " to $routerip\n";
@@ -595,7 +673,7 @@ sub _build_hopdata
          $row{hop} = $hop;
       }
 
-      $row{routerip} = $routerip unless defined $row{routerip};
+      $row{routerip} = $routerip unless $row{routerip};
    }
 
    $row{results} = \@results;
@@ -610,7 +688,7 @@ __END__
 
 =head1 NAME
 
-POE::Component::Client::Traceroute - a non-blocking traceroute client
+POE::Component::Client::Traceroute - A non-blocking traceroute client
 
 =head1 SYNOPSIS
 
@@ -713,12 +791,19 @@ POE::Component::Client::Traceroute is a non-blocking Traceroute client.
 It lets several other sessions traceroute through it in parallel, and it lets
 them continue doing other things while they wait for responses.
 
+=head2 Starting Traceroute Client
+
 Traceroute client components are not proper objects. Instead of being created, 
 as most objects are, they are "spawned" as separate sessions. To avoid 
 confusion, and to remain similar to other POE::Component modules, they must
 be spawned with the C<spawn> method, not created with a C<new> one.
 
-Furthermore, there should never be more than on PoCo::Client:Traceroute session
+  POE::Component::Client::Traceroute->spawn(
+    Alias          => 'tracer',   # Defaults to tracer
+    Parameter      => $value,      # Additional parameters
+  );
+
+Furthermore, there should never be more than one PoCo::Client:Traceroute session
 spawned within an application at the same time. Doing so may cause unexpected
 results.
 
@@ -802,23 +887,57 @@ this option will cause the component to die.
 
 =item Debug => $debug
 
-C<Debug> enables verbose debugging output. Debug defaults to 0.
+C<Debug> enables verbose debugging output. Debug defaults to 0. Debug can not
+be overridden.
 
 =item DebugSocket => $debug_sock
 
 C<DebugSocket> enables verbose debugging on socket activity. DebugSocket
-defaults to 0.
+defaults to 0. DebugSocket can not be overridden.
 
 =back
 
-Sessions communicate asynchronously with the Client::Traceroute component.
-The post traceroute requests to it, and the receive events back upon 
-completion. The optionally receive events after each hop.
+=head2 Events
 
-Requests are posted to the components 'traceroute' handler. The include
-the name of an event to post back, an address to traceroute to, and optionally
-parameters to override from the default and callback arguments. The address
+The PoCo::Client::Traceroute session has two public event handlers.
+
+=over 2
+
+=item C<traceroute>
+
+The traceroute event handler is how new hosts to traceroute are added to the
+component. Any active POE session can post to this event. The component does
+not have any internal queuing, so care should be made to not start more
+events than your system can handle processing at one time.
+
+=item C<shutdown>
+
+The shutdown event closes all running traceroutes, posts back current data
+with the 'Session shutdown' error message and closes the session.
+
+=back
+
+=head3 traceroute event
+
+Sessions communicate asynchronously with the Client::Traceroute component.
+They post traceroute requests to it, and the receive events back upon 
+completion. They optionally receive events after each hop.
+
+Requests are posted to the components 'traceroute' handler. They include
+the name of an event to post back, an address to traceroute to, optionally,
+parameters to override from the default, and callback arguments. The address
 may be a numeric dotted quad, a packed inet_aton address, or a host name.
+
+  $kernel->post(
+    "tracer",           # Post request to 'tracer' component
+    "traceroute",       # Ask it to traceroute to an address
+    "trace_response",   # Post answers to 'trace_response'
+    $destination,       # The system to traceroute to
+    [
+      Parameter => $value,    # Overrides global setting for this request
+      Callback  => [ $args ], # Data to send back with postback event
+    ]
+  );
 
 Traceroute responses come with two array references:
 
@@ -888,8 +1007,8 @@ The structure of the array ref is the following:
 =item C<$data-E<gt>{routerip}>
 
 This is the router IP which responded with the TTL expired in transit or
-destination unreachable message. If it changes a new row is generated. If
-all queries for this hop timed out, this will be set to an empty string.
+destination unreachable message. If it changes, a new row is generated. If
+all queries for this hop timed out than this will be set to an empty string.
 
 =item C<$data-E<gt>{hop}>
 
@@ -899,13 +1018,33 @@ for each TTL between FirstHop and reaching the device or MaxTTL.
 =item C<$data-E<gt>{results}>
 
 This is an array ref containing the result round trip times for each query
-in seconds to millisecond precision depending on the system. If a query packet
-timed out the entry in the array will be set to "*".
+in seconds, with millisecond precision depending on the system. If a query 
+packet times out the entry in the array will be set to "*".
 
 =back
 
 =back
 
+=head3 shutdown event
+
+The PoCo::Client::Traceroute session must be shutdown in order to exit.
+To shut down the session, post a 'shutdown' event to it. This will cause all
+running traceroutes to postback their current results and the stop the session.
+
+  $kernel->post( 'tracer' => 'shutdown' );
+
+or
+
+  my $success = $kernel->call( 'tracer' => 'shutdown' );
+
+=head2 Traceroute Notes
+
+Only one instance of this component should be spawned at a time. Multiple
+instances may have indeterminant behavior.
+
+The component does not have any internal queue. Care should be taken to only
+launch as many traceroutes as your system can handle at one time.
+  
 =head1 SEE ALSO
 
 This component's Traceroute code was heavily influenced by 
@@ -913,22 +1052,38 @@ Net::Traceroute::PurePerl and Net::Ping.
 
 See POE for documentation on how POE works.
 
+You can learn more about POE at <http://poe.perl.org/>.
+
 Also see the test program, t/01_trace.t, in the distribution.
 
-=head1 BUGS
+=head1 DEPENDENCIES
+
+POE::Component::Client::Traceroute requires the following modules:
+
+L<POE>
+L<Carp>
+L<Socket>
+L<FileHandle>
+L<Net::RawIP>
+L<Time::HiRes>
+
+=head1 BUGS AND LIMITATIONS
 
 UseICMP currently errors out if set. This module was only tested on recent
 Linux platforms and may not work elsewhere.
 
-=head1 AUTHOR & COPYRIGHTS
+This module requires root privileges to run. It opens a raw socket to listen
+for TTL exceeded messages. Take appropriate precautions.
+
+=head1 AUTHOR
+
+Andrew Hoying <ahoying@cpan.org>
+
+=head1 LICENSE AND COPYRIGHT
 
 POE::Component::Client::Traceroute is Copyright 2006 by Andrew Hoying.
 All rights reserved. POE::Component::Client::Traceroute is free software; you
 may redistribute it and or modify it under the same terms as Perl itself.
-
-Andrew my be contacted by e-mail via <ahoying@cpan.org>.
-
-You can learn more about POE at <http://poe.perl.org/>.
 
 =cut
 
