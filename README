@@ -13,7 +13,7 @@ Requirements
 
 This module requires POE. It also requires root privileges, or the equivalent,
 to open raw sockets. Any hazards of doing this are left up to the implementor
-to work around. It also requires Net::RawIP to do the low level packet parsing.
+to work around. 
 
 ------------------
 Basic Installation

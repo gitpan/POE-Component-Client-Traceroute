@@ -59,6 +59,7 @@ POE::Session->create
                               QueryTimeout   => $qtimeout,
                               Queries        => $queries,
                               Callback       => 1,
+                              UseICMP        => 1,
                            ] );
 
          $_[HEAP]->{traces} = 2;

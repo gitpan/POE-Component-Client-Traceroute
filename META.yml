@@ -1,13 +1,12 @@
 --- #YAML:1.0
 name:                POE-Component-Client-Traceroute
-version:             0.11
+version:             0.20
 abstract:            POE component for non-blocking/concurrent traceroutes.
-license:             perl
+license:             unknown
 generated_by:        ExtUtils::MakeMaker version 6.30_01
 author:              Andrew Hoying <ahoying@cpan.org>
 distribution_type:   module
 requires:     
-    Net::RawIP:                    0.02
     POE:                           0.11
     Time::HiRes:                   1.2
 meta-spec:

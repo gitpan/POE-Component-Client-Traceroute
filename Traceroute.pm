@@ -5,12 +5,11 @@ use strict;
 
 use vars qw($VERSION $debug $debug_socket);
 
-$VERSION    = '0.11';
+$VERSION    = '0.20';
 
 use Carp qw(croak);
 use Socket;
 use FileHandle;
-use Net::RawIP;
 use Time::HiRes qw(time);
 
 use POE::Session;
@@ -21,17 +20,32 @@ $debug_socket  = 0;
 sub DEBUG            { return $debug } # Enable debug output.
 sub DEBUG_SOCKET     { return $debug_socket } # Output socket information.
 
-# from asm/socket.h
-sub SO_BINDTODEVICE  { return 25 }
 
-# from netinet/in.h
-sub IPPROTO_IP       { return 0 }
+use constant SO_BINDTODEVICE  => 25;   # from asm/socket.h
+use constant IPPROTO_IP       => 0;    # from netinet/in.h
+use constant IP_TTL           => 2;    # from bits/in.h
 
-# from bits/in.h
-sub IP_TTL           { return 2 }
+use constant IP_HEADERS       => 20;   # Length of IP headers
+use constant ICMP_HEADERS     => 8;
+use constant UDP_HEADERS      => 8;
 
-# Length of IP headers
-sub IP_HEADERS       { return 28 }
+use constant UDP_DATA         => IP_HEADERS + UDP_HEADERS;
+use constant ICMP_DATA        => IP_HEADERS + ICMP_HEADERS;
+
+use constant UDP_SPORT        => IP_HEADERS + 0;
+use constant UDP_DPORT        => IP_HEADERS + 2;
+
+use constant ICMP_TYPE        => IP_HEADERS + 0;
+use constant ICMP_CODE        => IP_HEADERS + 2;
+use constant ICMP_ID          => IP_HEADERS + 4;
+use constant ICMP_SEQ         => IP_HEADERS + 6;
+
+use constant ICMP_PORT        => 0;
+
+use constant ICMP_TIMEEXCEED  => 11;
+use constant ICMP_ECHO        => 8;
+use constant ICMP_UNREACHABLE => 3;
+use constant ICMP_ECHOREPLY   => 0;
 
 # Spawn a new PoCo::Client::Traceroute session. This is the basic
 # constructor, but it does not return an object. Instead it launches
@@ -57,7 +71,7 @@ sub spawn
    my $qtimeout   = delete $params{querytimeout} || 3;
    my $queries    = delete $params{queries} || 3;
    my $baseport   = delete $params{baseport} || 33434;
-   my $packetlen  = delete $params{packetlen} || 40;
+   my $packetlen  = delete $params{packetlen} || 68;
    my $srcaddr    = delete $params{sourceaddress} || undef;
    my $device     = delete $params{device} || undef;
    my $perhop     = delete $params{perhoppostback} || 0;
@@ -79,12 +93,8 @@ sub spawn
    ) if ($maxttl > 255);
 
    croak(
-      'PacketLen must be less than 1492 and greater than 31'
-   ) if ($packetlen > 1492 or $packetlen < 32);
-
-   croak(
-      'UseICMP option not yet implemented'
-   ) if ($useicmp);
+      'PacketLen can not be greater than 1492 or less than 68'
+   ) if ($packetlen > 1492 or $packetlen <= 68);
 
    POE::Session->create(
       inline_states => {
@@ -142,7 +152,7 @@ sub tracer_start
    DEBUG_SOCKET and warn "TRS: Created ICMP socket to receive errors\n";
    $heap->{icmpsocket} = $socket;
 
-   $kernel->select_read($socket, '_recv_packet', 0);
+   $kernel->select_read($socket, '_recv_packet');
 
    $heap->{alias}       = $alias;
    $kernel->alias_set($alias);
@@ -204,9 +214,6 @@ sub tracer_traceroute
       $error .= "traceroute's third argument must be an array ref\n";
    }
 
-   $error .= "UseICMP option not yet implemented\n"
-      if ($options{useicmp});
-
    $error .= "Baseport is too high, must be less than 65280\n"
       if ($options{baseport} > 65279);
 
@@ -219,8 +226,8 @@ sub tracer_traceroute
    $error .= "FirstHop must be less than or equal to MaxTTL\n"
       if ($options{firsthop} > $options{maxttl});
 
-   $error .= "PacketLen must be less than 1492 and greater than 31\n"
-      if ($options{packetlen} > 1492 or $options{packetlen} < 32);
+   $error .= "PacketLen can't be greater than 1492 or less than 68\n"
+      if ($options{packetlen} > 1492 or $options{packetlen} < 68);
 
    my $postback = $sender->postback( $event, $host, \%options, $callback );
 
@@ -275,7 +282,6 @@ sub tracer_shutdown
       my $error = "Traceroute session shutdown\n";
 
       $session->{postback}->(_build_postback_options($session,$error));
-      $kernel->select_read($session->{socket_handle});
       $kernel->alarm_remove($session->{timeout});
       delete $heap->{sessions}{$trsessionid};
    }
@@ -298,29 +304,57 @@ sub _start_traceroute
 
    DEBUG and warn "TR: Starting traceroute session $trsessionid\n";
 
-   my $proto   = getprotobyname('udp');
    my $socket  = FileHandle->new();
-   
-   socket($socket, PF_INET, SOCK_DGRAM, $proto) || 
-      croak("UDP Socket error - $!");
-   
-   DEBUG_SOCKET and warn "TRS: Created socket $socket\n";
-
-   if ($session->{options}{device})
+   if (not $session->{options}{useicmp})
    {
-      my $device = $session->{options}{device};
-      setsockopt($socket, SOL_SOCKET, SO_BINDTODEVICE(), pack('Z*', $device)) 
-         or croak "error binding to device $device - $!";
+      my $proto = getprotobyname('udp');
+   
+      socket($socket, PF_INET, SOCK_DGRAM, $proto) or
+         croak("UDP Socket error - $!");
+   }
+   elsif ($session->{options}{device} or 
+            $session->{options}{sourceaddress} ne '0.0.0.0')
+   {
+      my $proto = getprotobyname('icmp');
 
-      DEBUG_SOCKET and warn "TRS: Bound socket to $device\n";
+      socket($socket, PF_INET, SOCK_RAW, $proto) or
+         croak("ICMP Socket Error - $!");
+   }
+   else
+   {
+      undef $socket;
    }
 
-   if (  $session->{options}{sourceaddress} and 
-         $session->{options}{sourceaddress} ne '0.0.0.0' )
+   if ($socket)
    {
-      _bind($socket, $session->{options}{sourceaddress});
-   }
+      DEBUG_SOCKET and warn "TRS: Created socket $socket\n";
 
+      if ($session->{options}{device})
+      {
+         my $device = $session->{options}{device};
+         setsockopt($socket, SOL_SOCKET, SO_BINDTODEVICE(), 
+               pack('Z*', $device)) or croak "error binding to $device - $!";
+
+         DEBUG_SOCKET and warn "TRS: Bound socket to $device\n";
+      }
+
+      if (  $session->{options}{sourceaddress} and 
+            $session->{options}{sourceaddress} ne '0.0.0.0' )
+      {
+         _bind($socket, $session->{options}{sourceaddress});
+      }
+   }
+   elsif ($session->{options}{useicmp})
+   {
+      $socket = $heap->{icmpsocket};
+      $session->{icmpsocket} = 1;
+   }
+   else
+   {
+      $session->{postback}->(
+            _build_postback_options(undef,"Could not create socket\n")
+      );
+   }
 
    my $destination = inet_aton($session->{host});
    if (not defined $destination)
@@ -333,9 +367,7 @@ sub _start_traceroute
    {
       $session->{destination}    = $destination;
       $session->{socket_handle}  = $socket;
-      $kernel->select_read($socket, '_recv_packet', $trsessionid, 'xyz');
-
-                           
+      
       $kernel->yield( '_send_packet' => $trsessionid );
    }
 
@@ -358,19 +390,58 @@ sub _send_packet
    }
 
    my $hop           = $session->{hop};
-   my $port          = ($session->{lastport}) ? 
-      $session->{lastport} + 1 : $session->{options}{baseport} + $hop - 1;
-
    my $currentquery  = scalar keys %{$session->{hops}{$hop}};
 
-   my $message       = 'a' x ($session->{options}{packetlen} - IP_HEADERS);
-   
-   if (not exists $session->{lastport} or $session->{lastport} != $port)
-   {
-      _connect($session,$port);
+   my $message;
+   my $saddr;
 
-      $session->{lastport}                   = $port;
-      $heap->{ports}{$session->{localport}}  = $trsessionid;
+   if ($session->{options}{useicmp})
+   {
+      my $port    = ICMP_PORT;
+      $saddr      = _connect($session,$port);
+
+      my $seq     = ++$heap->{lastseq} & 0xFFFF;
+      
+      my $data    = sprintf("%05i/%03i/%02i/",$trsessionid,$hop,$currentquery);
+      $data      .= 'a' x ($session->{options}{packetlen} - ICMP_DATA - 13);
+
+      my $pkt     = pack('CC n3 A' . length($data), 
+                           ICMP_ECHO,  # Type
+                           0,          # Code
+                           0,          # Checksum (will be computed next)
+                           $$,         # ID (PID)
+                           $seq,       # Sequence
+                           $data,      # Data
+                        );
+
+      my $chksum  = _checksum($pkt);
+
+      $message    = pack('CC n3 A' . length($data), 
+                           ICMP_ECHO,  # Type
+                           0,          # Code
+                           $chksum,    # Checksum
+                           $$,         # ID (PID)
+                           $seq,       # Sequence
+                           $data,      # Data
+                        );
+
+      $heap->{sequences}{$seq}   = $trsessionid;
+      $session->{lastseq}        = $seq;
+   }
+   else
+   {
+      my $port    = ($session->{lastport}) ? 
+         $session->{lastport} + 1 : $session->{options}{baseport} + $hop - 1;
+
+      $message = 'a' x ($session->{options}{packetlen} - UDP_DATA);
+   
+      if (not exists $session->{lastport} or $session->{lastport} != $port)
+      {
+         _connect($session,$port);
+
+         $session->{lastport}                   = $port;
+         $heap->{ports}{$session->{localport}}  = $trsessionid;
+      }
    }
 
    $session->{lasttime} = time;
@@ -380,7 +451,14 @@ sub _send_packet
    $session->{alarm}    = $alarm;
 
    DEBUG and warn "TR: Sent packet for $trsessionid\n";
-   send($session->{socket_handle}, $message, 0);
+   if ($session->{options}{useicmp})
+   {
+      send($session->{socket_handle}, $message, 0, $saddr);
+   }
+   else
+   {
+      send($session->{socket_handle}, $message, 0);
+   }
    
    return;
 }
@@ -394,42 +472,88 @@ sub _send_packet
 
 sub _recv_packet
 {
-   my ($kernel, $heap, $socket, $trsessionid) = @_[ KERNEL, HEAP, ARG0, ARG2 ];
-   my ($recv_msg, $from_saddr, $from_port, $from_ip, $destunreach);
+   my ($kernel, $heap, $socket) = @_[ KERNEL, HEAP, ARG0 ];
+   my ($recv_msg, $from_saddr, $from_port, $from_ip);
+   my ($trsessionid, $replytime, $lasthop);
 
-   my $replytime = time;
+   $replytime  = time;
+   $lasthop    = 0;
 
-   $from_saddr             = recv($socket, $recv_msg, 1500, 0);
-   
+   $from_saddr = recv($socket, $recv_msg, 1500, 0);
    if (defined $from_saddr)
    {
       ($from_port,$from_ip)   = sockaddr_in($from_saddr);
       $from_ip                = inet_ntoa($from_ip);
       DEBUG and warn "TR: Received packet from $from_ip\n";
    }
-
-   if (defined $trsessionid and $trsessionid == 0)
+   else
    {
-      DEBUG and warn "TR: Received ICMP packet\n";
+      DEBUG and warn "TR: No packet?\n";
+      return;
+   }
 
-      my $icmp = new Net::RawIP({icmp=>{}});
-      my $udp  = new Net::RawIP({udp=>{}});
+   my ($type,$code)  = unpack('CC',substr($recv_msg,ICMP_TYPE,2));
+   my $icmp_data     = substr($recv_msg,ICMP_DATA);
+   
+   if (  $type == ICMP_TIMEEXCEED or 
+         $type == ICMP_UNREACHABLE or 
+         $type == ICMP_ECHOREPLY )
+   {
 
-      $icmp->bset($recv_msg);
-      my ($icmp_ip,$type,$code,$icmp_data) = 
-         $icmp->get({ip=>['daddr'],icmp=>['type','code','data']});
-
-      $from_ip = inet_ntoa(pack('N',$icmp_ip)) unless ($from_ip);
-
-      if ($type == 11 or $type == 3)
+# This is kind of a hack. It checks if the first two bytes in little-endian
+# order equal 8, which is 0800 (type 8 code 0). Otherwise the packet must be
+# a udp traceroute reply. Only if the UDP source port was 8 would this fail.
+# We always choose a high port for UDP, so it should never fail.
+      my $rawcode = unpack('v',substr($icmp_data,ICMP_TYPE,2));
+      
+      if ($type != ICMP_ECHOREPLY and $rawcode != ICMP_ECHO)
       {
-         $udp->bset($icmp_data);
-         my ($reply_sport,$reply_dport) = $udp->get({udp=>['source','dest']});
+         my $sport      = unpack('n',substr($icmp_data,UDP_SPORT,2));
+         my $dport      = unpack('n',substr($icmp_data,UDP_DPORT,2));
 
-         $from_port = $reply_dport; # Set $from_port from the UDP packet
+         $from_port     = $dport; # Set $from_port from the UDP packet
+         $trsessionid   = $heap->{ports}{$sport};
+         $lasthop       = ($type == ICMP_UNREACHABLE) ? 1 : 0;
+      }
+      else # Must not be a UDP packet, try icmp
+      {
+         if ($type == ICMP_ECHOREPLY)
+         {
+            my $icmp_id = unpack('n',substr($recv_msg,ICMP_ID,2));
+            return unless ($icmp_id == $$);
 
-         $trsessionid   = $heap->{ports}{$reply_sport};
-         $destunreach   = ($type == 3) ? 1 : 0;
+            my $seq     = unpack('n',substr($recv_msg,ICMP_SEQ,2));
+
+            my ($hop, $currentquery);
+
+            ($trsessionid,$hop,$currentquery) = 
+               map{int $_} grep{/^\d+$/} split('/',$icmp_data);
+
+            if ($hop != $heap->{sessions}{$trsessionid}{hop})
+            {
+               DEBUG and warn 
+                  "TR: Packet out of order or after timeout, dropping\n";
+               return;
+            }
+            
+            $from_port     = $seq; # Reusing the variable
+            $lasthop       = 1; 
+
+            DEBUG and warn "Got echo reply for $trsessionid\n";
+         }
+         else
+         {
+            my $icmp_id = unpack('n',substr($icmp_data,ICMP_ID,2));
+            return unless ($icmp_id == $$);
+
+            my $ptype   = unpack('C',substr($icmp_data,ICMP_TYPE,1));
+            my $pseq    = unpack('n',substr($icmp_data,ICMP_SEQ,2));
+            if ($ptype eq ICMP_ECHO)
+            {
+               $trsessionid   = $heap->{sequences}{$pseq};
+               $from_port     = $pseq; # Reusing the variable
+            }
+         }
       }
    }
 
@@ -438,7 +562,9 @@ sub _recv_packet
       my $session = $heap->{sessions}{$trsessionid};
       DEBUG and warn "TR: Received packet for $trsessionid\n";
 
-      if ($from_port != $session->{lastport})
+      if (($session->{options}{useicmp} and $from_port != $session->{lastseq})
+            or ( not $session->{options}{useicmp} and 
+                 $from_port != $session->{lastport} ) )
       {
          DEBUG and warn "TR: Packet out of order or after timeout, dropping\n";
          return;
@@ -454,7 +580,7 @@ sub _recv_packet
             replytime   => $replytime - $session->{lasttime},
       };
 
-      $session->{stop} = 1 if ($destunreach);
+      $session->{stop} = $lasthop;
 
       my $continue = _process_results($session,$currentquery);
 
@@ -464,7 +590,6 @@ sub _recv_packet
       }
       else
       {
-         $kernel->select_read($session->{socket_handle});
          $kernel->alarm_remove($session->{timeout});
          delete $heap->{sessions}{$trsessionid};
       }
@@ -491,7 +616,6 @@ sub _timeout
       my $error = "Traceroute session timeout\n";
 
       $session->{postback}->(_build_postback_options($session,$error));
-      $kernel->select_read($session->{socket_handle});
       $kernel->alarm_remove($session->{timeout});
       delete $heap->{sessions}{$trsessionid};
       return;
@@ -511,15 +635,17 @@ sub _timeout
    if ($continue)
    {
       # Reconnect on timeout so we get a new port.
-      $session->{lastport}++;
+      if (not $session->{options}{useicmp})
+      {
+         $session->{lastport}++;
 
-      _connect($session,$session->{lastport});
-      $heap->{ports}{$session->{localport}} = $trsessionid;
+         _connect($session,$session->{lastport});
+         $heap->{ports}{$session->{localport}} = $trsessionid;
+      }
       $kernel->yield('_send_packet',$trsessionid);
    }
    else
    {
-      $kernel->select_read($session->{socket_handle});
       $kernel->alarm_remove($session->{timeout});
       delete $heap->{sessions}{$trsessionid};
    }
@@ -564,17 +690,23 @@ sub _connect
    my $hop              = $session->{hop};
    my $socket_addr      = sockaddr_in($port,$session->{destination});
 
-   connect($session->{socket_handle},$socket_addr);
-   DEBUG_SOCKET and warn "TRS: Connected to $session->{host}\n";
+   if (not $session->{options}{useicmp})
+   {
+      connect($session->{socket_handle},$socket_addr);
+      DEBUG_SOCKET and warn "TRS: Connected to $session->{host}\n";
+   }
 
    setsockopt($session->{socket_handle}, IPPROTO_IP, IP_TTL, pack('C',$hop));
    DEBUG_SOCKET and warn "TRS: Set TTL to $hop\n";
 
-   my $localaddr           = getsockname($session->{socket_handle});
-   my ($lport,$addr)       = sockaddr_in($localaddr);
-   $session->{localport}   = $lport;
+   if (not $session->{options}{useicmp})
+   {
+      my $localaddr           = getsockname($session->{socket_handle});
+      my ($lport,$addr)       = sockaddr_in($localaddr);
+      $session->{localport}   = $lport;
+   }
 
-   return;
+   return $socket_addr;
 }
 
 # This function is called after every packet is received or timed out.
@@ -666,8 +798,10 @@ sub _build_hopdata
          DEBUG and warn "TR: Router IP changed during hop $hop from " .
             $row{routerip} . " to $routerip\n";
 
-         $row{results} = \@results;
-         push (@hopdata,\%row);
+         my %newrow     = %row;
+         my @newresults = @results;
+         $newrow{results} = \@newresults;
+         push (@hopdata,\%newrow);
          undef %row;
          undef @results;
          $row{hop} = $hop;
@@ -676,10 +810,39 @@ sub _build_hopdata
       $row{routerip} = $routerip unless $row{routerip};
    }
 
-   $row{results} = \@results;
-   push (@hopdata,\%row);
+   if (@results)
+   {
+      $row{results} = \@results;
+      push (@hopdata,\%row);
+   }
 
    return @hopdata;
+}
+
+# Lifted verbatum from Net::Ping 2.31
+# Description:  Do a checksum on the message.  Basically sum all of
+# the short words and fold the high order bits into the low order bits.
+
+sub _checksum
+{
+  my $msg = shift;
+
+  my ($len_msg,       # Length of the message
+      $num_short,     # The number of short words in the message
+      $short,         # One short word
+      $chk            # The checksum
+      );
+
+  $len_msg = length($msg);
+  $num_short = int($len_msg / 2);
+  $chk = 0;
+  foreach $short (unpack("n$num_short", $msg))
+  {
+    $chk += $short;
+  }                                           # Add the odd byte in
+  $chk += (unpack("C", substr($msg, $len_msg - 1, 1)) << 8) if $len_msg % 2;
+  $chk = ($chk >> 16) + ($chk & 0xffff);      # Fold high into low
+  return(~(($chk >> 16) + $chk) & 0xffff);    # Again and complement
 }
 
 1;
@@ -702,11 +865,11 @@ POE::Component::Client::Traceroute - A non-blocking traceroute client
     QueryTimeout   => 3,          # Defaults to 3 seconds
     Queries        => 3,          # Defaults to 3 queries per hop
     BasePort       => 33434,      # Defaults to 33434
-    PacketLen      => 128,        # Defaults to 40
+    PacketLen      => 128,        # Defaults to 68
     SourceAddress  => '0.0.0.0',  # Defaults to '0.0.0.0'
     PerHopPostback => 0,          # Defaults to no PerHopPostback
     Device         => 'eth0',     # Defaults to undef
-    UseICMP        => 0,          # Defaults to 0, NOTE: Not implemented!
+    UseICMP        => 0,          # Defaults to 0
     Debug          => 0,          # Defaults to 0
     DebugSocket    => 0,          # Defaults to 0
   );
@@ -860,7 +1023,7 @@ BasePort defaults to 33434 and can not be higher than 65279.
 =item PacketLen => $packetlen
 
 C<PacketLen> sets the length of the packet to this many bytes. PacketLen
-defaults to 40 and can not be less than 32 or greater than 1492.
+defaults to 68 and can not be less than 68 or greater than 1492.
 
 =item SourceAddress => $sourceaddress
 
@@ -882,8 +1045,9 @@ default there is no PerHopPostback.
 
 =item UseICMP => $useicmp
 
-C<UseICMP> is not yet implemented and the interface to it may change. Setting
-this option will cause the component to die.
+C<UseICMP> causes the traceroute to use ICMP Echo Requests instead of UDP
+packets. This is advantagious in networks where ICMP Unreachables are disabled,
+as ICMP Echo Responses are usually still allowed.
 
 =item Debug => $debug
 
@@ -1039,12 +1203,20 @@ or
 
 =head2 Traceroute Notes
 
+=over 2
+
+=item *
+
 Only one instance of this component should be spawned at a time. Multiple
 instances may have indeterminant behavior.
 
+=item *
+
 The component does not have any internal queue. Care should be taken to only
 launch as many traceroutes as your system can handle at one time.
-  
+
+=back
+
 =head1 SEE ALSO
 
 This component's Traceroute code was heavily influenced by 
@@ -1054,7 +1226,8 @@ See POE for documentation on how POE works.
 
 You can learn more about POE at <http://poe.perl.org/>.
 
-Also see the test program, t/01_trace.t, in the distribution.
+See also the test program, t/01_trace.t or the example in the 
+examples directory of the distribution
 
 =head1 DEPENDENCIES
 
@@ -1064,16 +1237,35 @@ L<POE>
 L<Carp>
 L<Socket>
 L<FileHandle>
-L<Net::RawIP>
 L<Time::HiRes>
 
 =head1 BUGS AND LIMITATIONS
 
-UseICMP currently errors out if set. This module was only tested on recent
-Linux platforms and may not work elsewhere.
+Please report any bugs to the author and use http://rt.cpan.org/
 
 This module requires root privileges to run. It opens a raw socket to listen
 for TTL exceeded messages. Take appropriate precautions.
+
+This module does not support IPv6.
+
+=head1 TODO
+
+=over 2
+
+=item *
+
+Implement IPv6 capability.
+
+=item *
+
+Possibly implement TCP traceroute if there is demand.
+
+=item *
+
+Send multiple requests in parallel for each traceroute like the Linux
+traceroute application does.
+
+=back
 
 =head1 AUTHOR
 

@@ -3,5 +3,6 @@ MANIFEST
 Makefile.PL
 README
 Traceroute.pm
+examples/poe-traceroute.pl
 t/01_trace.t
 META.yml                                 Module meta-data (added by MakeMaker)
