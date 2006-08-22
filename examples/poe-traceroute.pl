@@ -130,12 +130,13 @@ POE::Session->create
                my $x = 0;
                foreach my $rtt (@trip_times)
                {
-                  if (++$x % 5 == 0)
+                  if ($x and $x % 4 == 0) # Wrap every 4 lines
                   {
                      printf "\n%3s  %-15s ",$distance,$host;
                   }
                   if ($rtt eq "*") { printf "%-12s ", $rtt; }
                   else { printf "%-12s ", sprintf "%0.3f ms ", $rtt*1000; }
+                  $x++;
                }
                print "\n";
             }

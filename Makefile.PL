@@ -12,14 +12,13 @@ WriteMakefile(
 #    LICENSE      => 'perl', # Not yet supported under main MakeMaker
     VERSION_FROM => 'Traceroute.pm',
 
-    PM           => { 'Traceroute.pm' => '${INST_LIBDIR}/Traceroute.pm' },
     PREREQ_PM    => {
-        POE         => 0.11,
-        Time::HiRes => 1.20,
+        'POE'         	=> 0.11,
+        'Time::HiRes'	=> 1.20,
     },
     dist         => {
-        COMPRESS    => 'gzip',
-        SUFFIX      => 'gz'
+        'COMPRESS'   	=> 'gzip',
+        'SUFFIX'      	=> 'gz'
     },
 );
 

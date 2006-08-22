@@ -5,7 +5,7 @@ use strict;
 
 use vars qw($VERSION $debug $debug_socket);
 
-$VERSION    = '0.20';
+$VERSION    = '0.21';
 
 use Carp qw(croak);
 use Socket;
@@ -14,20 +14,30 @@ use Time::HiRes qw(time);
 
 use POE::Session;
 
+BEGIN
+{
+   if ($^O eq "MSWin32" and $^V eq v5.8.6)
+   {
+      $ENV{PERL_ALLOW_NON_IFS_LSP} = 1;
+   }
+}
+
 $debug         = 0;
 $debug_socket  = 0;
 
 sub DEBUG            { return $debug } # Enable debug output.
 sub DEBUG_SOCKET     { return $debug_socket } # Output socket information.
 
-
 use constant SO_BINDTODEVICE  => 25;   # from asm/socket.h
 use constant IPPROTO_IP       => 0;    # from netinet/in.h
-use constant IP_TTL           => 2;    # from bits/in.h
+
+sub IP_TTL           { return ($^O eq "MSWin32") ? 4 : 2 } # Winsock2 vs bits.h
 
 use constant IP_HEADERS       => 20;   # Length of IP headers
 use constant ICMP_HEADERS     => 8;
 use constant UDP_HEADERS      => 8;
+
+use constant IP_PROTOCOL      => 9;
 
 use constant UDP_DATA         => IP_HEADERS + UDP_HEADERS;
 use constant ICMP_DATA        => IP_HEADERS + ICMP_HEADERS;
@@ -79,6 +89,13 @@ sub spawn
 
    $debug         = delete $params{debug} || $debug;
    $debug_socket  = delete $params{debugsocket} || $debug_socket;
+
+   if ($^O eq "MSWin32" and not $useicmp)
+   {
+      DEBUG and warn "TR: Windows version doesn't support UDP traceroute. " .
+         "Switching to ICMP\n";
+      $useicmp = 1;
+   }
    
    croak(
       "$type doesn't know these parameters: ", join(', ', sort keys %params)
@@ -94,7 +111,7 @@ sub spawn
 
    croak(
       'PacketLen can not be greater than 1492 or less than 68'
-   ) if ($packetlen > 1492 or $packetlen <= 68);
+   ) if ($packetlen > 1492 or $packetlen < 68);
 
    POE::Session->create(
       inline_states => {
@@ -302,6 +319,8 @@ sub _start_traceroute
    my ($kernel,$heap,$trsessionid) = @_[ KERNEL, HEAP, ARG0 ];
    my $session = $heap->{sessions}{$trsessionid};
 
+   return unless ($_[SESSION] eq $_[SENDER]);
+
    DEBUG and warn "TR: Starting traceroute session $trsessionid\n";
 
    my $socket  = FileHandle->new();
@@ -343,6 +362,7 @@ sub _start_traceroute
       {
          _bind($socket, $session->{options}{sourceaddress});
       }
+
    }
    elsif ($session->{options}{useicmp})
    {
@@ -384,6 +404,8 @@ sub _send_packet
    my ($kernel, $heap, $trsessionid) = @_[ KERNEL, HEAP, ARG0 ];
    my $session = $heap->{sessions}{$trsessionid};
 
+   return unless ($_[SESSION] eq $_[SENDER]);
+   
    if (not exists $session->{hop})
    {
       $session->{hop} = $session->{options}{firsthop};
@@ -476,6 +498,8 @@ sub _recv_packet
    my ($recv_msg, $from_saddr, $from_port, $from_ip);
    my ($trsessionid, $replytime, $lasthop);
 
+   return unless ($_[SESSION] eq $_[SENDER]);
+
    $replytime  = time;
    $lasthop    = 0;
 
@@ -492,8 +516,23 @@ sub _recv_packet
       return;
    }
 
+   my $proto         = unpack('C',substr($recv_msg,IP_PROTOCOL,1));
+   
+   if ($proto != 1)
+   {
+      my $protoname = getprotobynumber($proto);
+      DEBUG and warn "TR: Packet protocol not ICMP $proto($protoname)\n";
+      return;
+   }
+
    my ($type,$code)  = unpack('CC',substr($recv_msg,ICMP_TYPE,2));
    my $icmp_data     = substr($recv_msg,ICMP_DATA);
+
+   if (not $icmp_data)
+   {
+      DEBUG and warn "TR: No data in packet.\n";
+      return;
+   }
    
    if (  $type == ICMP_TIMEEXCEED or 
          $type == ICMP_UNREACHABLE or 
@@ -610,6 +649,7 @@ sub _timeout
    my $session = $heap->{sessions}{$trsessionid};
 
    return unless $session;
+   return unless ($_[SESSION] eq $_[SENDER]);
 
    if ($stop)
    {
@@ -617,6 +657,7 @@ sub _timeout
 
       $session->{postback}->(_build_postback_options($session,$error));
       $kernel->alarm_remove($session->{timeout});
+
       delete $heap->{sessions}{$trsessionid};
       return;
    }
@@ -1243,10 +1284,15 @@ L<Time::HiRes>
 
 Please report any bugs to the author and use http://rt.cpan.org/
 
-This module requires root privileges to run. It opens a raw socket to listen
-for TTL exceeded messages. Take appropriate precautions.
+This module requires root or administrative privileges to run. It opens a raw 
+socket to listen for TTL exceeded messages. Take appropriate precautions.
 
 This module does not support IPv6.
+
+This module only supports ICMP traceroutes under Windows.
+
+This module is a little slow since it only sends one packet at a time to
+any given destination.
 
 =head1 TODO
 
@@ -1258,12 +1304,14 @@ Implement IPv6 capability.
 
 =item *
 
-Possibly implement TCP traceroute if there is demand.
+Implement TCP traceroute.
 
 =item *
 
-Send multiple requests in parallel for each traceroute like the Linux
-traceroute application does.
+Send multiple requests to the same destination in parallel for each 
+traceroute like the Linux traceroute application does. Currently requests to
+different destinations are sent in parallel, but each packet to the same
+destination is sent serially.
 
 =back
 

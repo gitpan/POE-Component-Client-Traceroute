@@ -1,3 +1,13 @@
+  0.21 Tue Aug 22 17:17:00 MST 2006
+	- Fixed possible crash due to unexpected ICMP message
+	- Added basic Windows support, tested on Win XP SP2
+	- Fixed Makefile.PL to compile on Windows
+
+       Thu Aug 10 16:41:00 MST 2006
+        - Made private events return unless called from current session
+        - Fixed bug in packetlen too short detection
+        - Fixed wrapping bug in poe-traceroute.pl example
+
   0.20 Thu Aug 10 12:46:00 MST 2006
         - Added poe_traceroute.pl to examples, released beta version to CPAN
 
